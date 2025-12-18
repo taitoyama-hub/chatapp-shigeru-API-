@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Firebase_version9_RealtimeDB(G'sACADEMY初学者用サンプル)</title>
+    <link rel="stylesheet" href="css/reset.css">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+
+    <h1>チャットアプリ</h1>
+    <!-- コンテンツ表示画面 -->
+    <div class="container">
+        <!-- 左側：入力欄 -->
+        <div class="input-section">
+            <input type="text" id="uname" placeholder="名前を入力してください">
+            <textarea id="text" placeholder="文章を入力してください&#10;&#10;【使い方】&#10;・「ポケモン25」と入力すると、そのポケモンの概要を表示します"></textarea>
+            <div class="button-group">
+                <button id="send">送信</button>
+                <button id="clear">全削除</button>
+            </div>
+        </div>
+        <!-- 右側：表示欄 -->
+        <div class="output-section">
+            <div id="output"></div>
+        </div>
+    </div>
+
+
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <script type="module">
+        // Import the functions you need from the SDKs you need
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.1.0/firebase-app.js";
+        import { getDatabase, ref, push, set, onChildAdded, remove, onChildRemoved }
+            from "https://www.gstatic.com/firebasejs/9.1.0/firebase-database.js";
+        // Your web app's Firebase configuration
+        const firebaseConfig = {
+            apiKey: "xxxx",//削除しました
+            authDomain: "dev30-f18-a2fb2.firebaseapp.com",
+            databaseURL: "https://dev30-f18-a2fb2-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "dev30-f18-a2fb2",
+            storageBucket: "dev30-f18-a2fb2.firebasestorage.app",
+            messagingSenderId: "464983233738",
+            appId: "1:464983233738:web:a11b12e2c5da4fae205033"
+        };
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app); //RealtimeDBに接続
+        const dbRef = ref(db, "chat"); //RealtimeDB内の"chat"を使う
+
+        // Gemini APIキーを設定
+
+        const GEMINI_API_KEY = "xxxx";//削除しました
+
+        // Gemini APIを使ってポケモンの概要を取得する関数
+        async function getPokemonInfoFromGemini(pokemonNumber, pokemonName = null) {
+            // タイムアウト処理用のAbortControllerを作成
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒でタイムアウト
+
+            try {
+                // Gemini APIにリクエストを送信
+                // gemini-2.5-flashモデルを使用
+                const modelName = 'gemini-2.5-flash';
+                const response = await fetch(
+                    `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            contents: [{
+                                parts: [{
+                                    text: pokemonName
+                                        ? `ポケモン「${pokemonName}」（全国図鑑番号${pokemonNumber}）について、名前、タイプ、特徴、能力などを日本語で簡潔にまとめて教えてください。`
+                                        : `ポケモン全国図鑑番号${pokemonNumber}のポケモンについて、名前、タイプ、特徴、能力などを日本語で簡潔にまとめて教えてください。`
+                                }]
+                            }]
+                        }),
+                        signal: controller.signal // タイムアウト用のシグナルを追加
+                    }
+                );
+
+                // タイムアウトタイマーをクリア
+                clearTimeout(timeoutId);
+
+                // レスポンスをJSON形式で取得（エラーの場合も含む）
+                const data = await response.json();
+
+                // レスポンスが正常かチェック
+                if (!response.ok) {
+                    const errorMessage = data?.error?.message || '不明なエラー';
+                    const errorCode = data?.error?.code || response.status;
+                    throw new Error(`Gemini APIエラー (${errorCode}): ${errorMessage}`);
+                }
+
+                // テキストを抽出
+                if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+                    throw new Error('レスポンスの形式が正しくありません');
+                }
+
+                return data.candidates[0].content.parts[0].text || "ポケモンの情報を取得できませんでした";
+            } catch (error) {
+                // タイムアウトタイマーをクリア
+                clearTimeout(timeoutId);
+
+                // エラーが発生した場合の処理
+                if (error.name === 'AbortError') {
+                    return "Gemini APIの応答がタイムアウトしました。しばらく待ってから再度お試しください。";
+                }
+                return `Gemini APIの呼び出しに失敗しました: ${error.message}`;
+            }
+        }
+
+        // ポケモンAPIから指定された番号のポケモンの画像と名前を取得する関数（APIキー不要）
+        async function getPokemonImageByNumber(pokemonNumber) {
+            try {
+                // ポケモンAPIからデータを取得
+                const response = await fetch(`https://pokeapi.co/api/v2/pokemon/${pokemonNumber}`);
+
+                // レスポンスが正常かチェック
+                if (!response.ok) {
+                    throw new Error('APIのレスポンスが正常ではありません');
+                }
+
+                // レスポンスをJSON形式で取得
+                const data = await response.json();
+
+                // ポケモンの画像URLと名前を返す
+                return {
+                    imageUrl: data.sprites.front_default,
+                    name: data.name
+                };
+            } catch (error) {
+                // エラーが発生した場合はnullを返す
+                return null;
+            }
+        }
+
+        // ポケモンAPIからランダムなポケモンの画像を取得する関数（APIキー不要）
+        async function getPokemonImage() {
+            try {
+                // ランダムなポケモンID（1-898の範囲）
+                const randomPokemonId = Math.floor(Math.random() * 898) + 1;
+
+                // ポケモンAPIからデータを取得
+                const response = await fetch(`https://pokeapi.co/api/v2/pokemon/${randomPokemonId}`);
+
+                // レスポンスが正常かチェック
+                if (!response.ok) {
+                    throw new Error('APIのレスポンスが正常ではありません');
+                }
+
+                // レスポンスをJSON形式で取得
+                const data = await response.json();
+
+                // ポケモンの画像URLと名前を取得
+                const pokemonImageUrl = data.sprites.front_default;
+                const pokemonName = data.name;
+
+                // 画像URLを返す（メッセージに含める形式）
+                return `ポケモン: ${pokemonName}\n${pokemonImageUrl}`;
+            } catch (error) {
+                // エラーが発生した場合の処理
+                console.error("ポケモンAPIエラー:", error);
+                return "ポケモンAPIの呼び出しに失敗しました。もう一度お試しください。";
+            }
+        }
+
+        //データ登録(Click)
+        $("#send").on("click", async function () {
+            const uname = $("#uname").val();
+            const text = $("#text").val();
+
+            // ユーザーのメッセージをFirebaseに保存
+            const msg = {
+                uname: uname,
+                text: text,
+                timestamp: new Date().toISOString(),
+            }
+
+            const newPostRef = push(dbRef);
+            set(newPostRef, msg);
+
+            // 入力欄を空にする
+            $("#uname").val("");
+            $("#text").val("");
+
+            // ポケモン番号が入力されているかチェック（例：「ポケモン25」「ポケモン 25」など）
+            const pokemonMatch = text.match(/ポケモン\s*(\d+)/i);
+            if (pokemonMatch) {
+                const pokemonNumber = pokemonMatch[1];
+
+                // ポケモンAPIから画像と名前を取得（1秒後）
+                setTimeout(async function () {
+                    const pokemonData = await getPokemonImageByNumber(pokemonNumber);
+
+                    if (pokemonData) {
+                        // 画像を表示
+                        const imageMsg = {
+                            uname: "ポケモン図鑑",
+                            text: `ポケモン: ${pokemonData.name}\n${pokemonData.imageUrl}`,
+                            timestamp: new Date().toISOString(),
+                        }
+                        const imageRef = push(dbRef);
+                        set(imageRef, imageMsg);
+
+                        // Gemini APIを使ってポケモンの情報を取得（画像取得後1秒）
+                        setTimeout(async function () {
+                            const pokemonInfo = await getPokemonInfoFromGemini(pokemonNumber, pokemonData.name);
+                            const infoMsg = {
+                                uname: "ポケモン図鑑",
+                                text: pokemonInfo,
+                                timestamp: new Date().toISOString(),
+                            }
+                            const infoRef = push(dbRef);
+                            set(infoRef, infoMsg);
+                        }, 1000);
+                    } else {
+                        // ポケモンAPIが失敗した場合のエラーメッセージ
+                        const errorMsg = {
+                            uname: "ポケモン図鑑",
+                            text: "ポケモンAPIの呼び出しに失敗しました。もう一度お試しください。",
+                            timestamp: new Date().toISOString(),
+                        }
+                        const errorRef = push(dbRef);
+                        set(errorRef, errorMsg);
+                    }
+                }, 1000);
+
+                // ポケモン番号が入力された場合は、シゲルのランダム応答を表示しない
+                return; // ここで処理を終了
+            }
+
+            // シゲルからの自動返信を追加（1秒後）
+            // 4つのランダム応答から1つを選ぶ
+            setTimeout(async function () {
+                // 0-3のランダムな数字を生成
+                const randomNumber = Math.floor(Math.random() * 4);
+
+                let replyText = "";
+
+                if (randomNumber === 0) {
+                    // 1つ目: 「いいんちゃう」
+                    replyText = "いいんちゃう";
+                } else if (randomNumber === 1) {
+                    // 2つ目: 「しらんけど」
+                    replyText = "しらんけど";
+                } else if (randomNumber === 2) {
+                    // 3つ目: 「これみとき」
+                    replyText = "これみとき https://ja.wikipedia.org/wiki/%E3%82%AA%E3%83%BC%E3%82%AD%E3%83%89%E3%83%BB%E3%82%B7%E3%82%B2%E3%83%AB";
+                } else if (randomNumber === 3) {
+                    // 4つ目: ポケモンAPI
+                    replyText = await getPokemonImage();
+                }
+
+                const replyMsg = {
+                    uname: "シゲル",
+                    text: replyText,
+                    timestamp: new Date().toISOString(),
+                }
+                const replyRef = push(dbRef);
+                set(replyRef, replyMsg);
+            }, 1000);
+            // この下は消さない
+        })
+
+        //データ登録(Enter)
+
+
+        //全データ削除
+        $("#clear").on("click", function () {
+            if (confirm("全てのデータを削除しますか？")) {
+                remove(dbRef);
+                $("#output").empty(); // 画面からも削除
+            }
+        });
+
+        //最初にデータ取得＆onSnapshotでリアルタイムにデータを取得
+        onChildAdded(dbRef, function (data) {
+            const msg = data.val();
+            const key = data.key;
+
+            // シゲルまたはポケモン図鑑のメッセージかどうかで判定（右側に表示）
+            const isShigeru = msg.uname === "シゲル" || msg.uname === "ポケモン図鑑";
+
+            const date = new Date(msg.timestamp);
+            const formattedDate = `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${date.getHours()}:${String(date.getMinutes()).padStart(2, '0')}`;
+
+            // 改行をHTMLの改行タグに変換
+            let messageText = msg.text.replace(/\n/g, '<br>');
+
+            // 画像URL（.png, .jpg, .gifなど）を検出して画像タグに変換
+            const imageUrlRegex = /(https?:\/\/[^\s]+\.(png|jpg|jpeg|gif|webp))/gi;
+            messageText = messageText.replace(imageUrlRegex, function (imageUrl) {
+                return `<img src="${imageUrl}" alt="画像" style="max-width: 200px; border-radius: 8px; margin-top: 5px; display: block;">`;
+            });
+
+            // 通常のURLをリンクに変換
+            const urlRegex = /(https?:\/\/[^\s]+|www\.[^\s]+|[^\s]+\.[a-z]{2,}[^\s]*)/gi;
+            messageText = messageText.replace(urlRegex, function (url) {
+                // 画像URLの場合はスキップ（既に処理済み）
+                if (url.match(/\.(png|jpg|jpeg|gif|webp)/i)) {
+                    return url;
+                }
+                // http://またはhttps://で始まらない場合は追加
+                let href = url;
+                if (!url.match(/^https?:\/\//i)) {
+                    href = 'http://' + url;
+                }
+                return `<a href="${href}" target="_blank" class="message-link">${url}</a>`;
+            });
+
+            let html = `
+            <div class="message ${isShigeru ? 'message-right' : 'message-left'}">
+                <div class="message-content">
+                    <div class="message-bubble ${isShigeru ? 'bubble-right' : 'bubble-left'}">
+                        <p class="message-text">${messageText}</p>
+                    </div>
+                    <p class="message-info">${msg.uname} - ${formattedDate}</p>
+                </div>
+            </div>
+            `
+            $("#output").append(html);
+            // 新しいメッセージが追加されたら自動的に下にスクロール
+            $("#output").scrollTop($("#output")[0].scrollHeight);
+            // この下は消さない
+        });
+
+        //データ削除時のリアルタイム更新
+        onChildRemoved(dbRef, function (data) {
+            $("#output").empty(); // 画面をクリアして再描画
+        });
+
+    </script>
+</body>
+
+</html>
